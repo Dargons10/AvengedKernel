@@ -413,8 +413,11 @@ static int ardbeg_camera_init(void)
 	tegra_io_dpd_enable(&csib_io);
 	tegra_io_dpd_enable(&csie_io);
 
-	i2c_register_board_info(2, ardbeg_camera_board_info,
-		ARRAY_SIZE(ardbeg_camera_board_info));
+	/* DISABLED: Use Device Tree for sensor registration only
+	 * Static registration causes EBUSY (-16) conflicts with DT
+	 * i2c_register_board_info(2, ardbeg_camera_board_info,
+	 * 	ARRAY_SIZE(ardbeg_camera_board_info));
+	 */
 
 	return 0;
 }
