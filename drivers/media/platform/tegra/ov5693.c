@@ -19,7 +19,6 @@
 #include <linux/fs.h>
 #include <linux/i2c.h>
 #include <linux/clk.h>
-#include <linux/miscdevice.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/regulator/consumer.h>
@@ -33,6 +32,9 @@
 #include <linux/sysedp.h>
 #include <media/ov5693.h>
 #include <media/nvc.h>
+#include <media/v4l2-device.h>
+#include <media/v4l2-subdev.h>
+#include <media/v4l2-ctrls.h>
 
 #define OV5693_ID			0x5693
 #define OV5693_SENSOR_TYPE		NVC_IMAGER_TYPE_RAW
@@ -49,6 +51,8 @@
 #define OV5693_LENS_VIEW_ANGLE_V	60000	/* _INT2FLOAT_DIVISOR */
 #define OV5693_OTP_BUF_SIZE		16
 #define OV5693_FUSE_ID_SIZE		8
+#define V4L2_IDENT_OV5693		5693
+
 
 static struct nvc_gpio_init ov5693_gpio[] = {
 	{ OV5693_GPIO_TYPE_PWRDN, GPIOF_OUT_INIT_LOW, "pwrdn", false, true, },
@@ -59,7 +63,8 @@ struct ov5693_info {
 	struct i2c_client *i2c_client;
 	struct ov5693_platform_data *pdata;
 	struct clk *mclk;
-	struct miscdevice miscdev;
+	struct v4l2_subdev subdev;
+	struct v4l2_mbus_framefmt format;
 	int pwr_api;
 	int pwr_dev;
 	struct nvc_gpio gpio[ARRAY_SIZE(ov5693_gpio)];
@@ -79,7 +84,13 @@ struct ov5693_info {
 	char devname[16];
 	struct ov5693_eeprom_data eeprom[OV5693_EEPROM_NUM_BLOCKS];
 	u8 eeprom_buf[OV5693_EEPROM_SIZE];
+	bool streaming;
 };
+
+static struct ov5693_info *to_ov5693_info(struct v4l2_subdev *sd)
+{
+	return container_of(sd, struct ov5693_info, subdev);
+}
 
 struct ov5693_reg {
 	u16 addr;
@@ -2280,7 +2291,7 @@ static inline int ov5693_coarse_time_reg(struct ov5693_reg *regs,
 		} \
 	} while (0)
 
-static int ov5693_set_frame_length(struct ov5693_info *info,
+static __maybe_unused int ov5693_set_frame_length(struct ov5693_info *info,
 				   u32 frame_length, bool group_hold)
 {
 	struct ov5693_reg reg_list[9];
@@ -2299,7 +2310,7 @@ static int ov5693_set_frame_length(struct ov5693_info *info,
 	return err;
 }
 
-static int ov5693_set_coarse_time(struct ov5693_info *info,
+static __maybe_unused int ov5693_set_coarse_time(struct ov5693_info *info,
 				  u32 coarse_time, u32 coarse_time_short,
 				  bool group_hold)
 {
@@ -2368,7 +2379,7 @@ static int ov5693_exposure_wr(struct ov5693_info *info,
 }
 
 
-static int ov5693_set_gain(struct ov5693_info *info, u32 gain, bool group_hold)
+static __maybe_unused int ov5693_set_gain(struct ov5693_info *info, u32 gain, bool group_hold)
 {
 	struct ov5693_reg reg_list[9];
 	int err = 0;
@@ -2496,7 +2507,7 @@ static int ov5693_lsc_wr(struct ov5693_info *info)
 	return err;
 }
 
-static int ov5693_set_group_hold(struct ov5693_info *info,
+static __maybe_unused int ov5693_set_group_hold(struct ov5693_info *info,
 				struct ov5693_ae *ae)
 {
 	int err = 0;
@@ -2935,7 +2946,7 @@ ov5693_mode_wr_err:
 	return err;
 }
 
-static int ov5693_get_fuse_id(struct ov5693_info *info)
+static __maybe_unused int ov5693_get_fuse_id(struct ov5693_info *info)
 {
 	int err;
 	int i;
@@ -2971,7 +2982,7 @@ static int ov5693_get_fuse_id(struct ov5693_info *info)
 	return 0;
 }
 
-static int ov5693_read_otp_bank(struct ov5693_info *info,
+static __maybe_unused int ov5693_read_otp_bank(struct ov5693_info *info,
 				struct ov5693_otp_bank *bank)
 {
 	int err;
@@ -3056,179 +3067,16 @@ ov5693_eeprom_device_init(struct ov5693_info *info)
 	return 0;
 }
 
-static int
+static __maybe_unused int
 ov5693_read_eeprom(struct ov5693_info *info, u8 reg, u16 length, u8 *buf)
 {
 	return regmap_raw_read(info->eeprom[0].regmap, reg, &buf[reg], length);
 }
 
-static int
+static __maybe_unused int
 ov5693_write_eeprom(struct ov5693_info *info, u16 addr, u8 val)
 {
 	return regmap_write(info->eeprom[addr >> 8].regmap, addr & 0xFF, val);
-}
-
-static long ov5693_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
-{
-	struct ov5693_info *info = file->private_data;
-	int err;
-
-	switch (_IOC_NR(cmd)) {
-	case _IOC_NR(OV5693_IOCTL_SET_MODE):
-	{
-		struct ov5693_mode mode;
-		if (copy_from_user(&mode,
-			(const void __user *)arg,
-			sizeof(struct ov5693_mode))) {
-			dev_err(&info->i2c_client->dev,
-				"%s:Failed to get mode from user.\n",
-			__func__);
-			return -EFAULT;
-		}
-		return ov5693_set_mode(info, &mode);
-	}
-	case _IOC_NR(OV5693_IOCTL_GET_STATUS): {
-		u8 status = 0;
-		if (copy_to_user((void __user *)arg, &status, sizeof(status))) {
-			dev_err(&info->i2c_client->dev,
-				"%s:Failed to copy status to user.\n",
-			__func__);
-			return -EFAULT;
-		}
-		return 0;
-		}
-
-	case _IOC_NR(OV5693_IOCTL_SET_GROUP_HOLD): {
-		struct ov5693_ae ae;
-		if (copy_from_user(&ae, (const void __user *)arg,
-				sizeof(struct ov5693_ae))) {
-			dev_dbg(&info->i2c_client->dev,
-				"%s:fail group hold\n", __func__);
-			return -EFAULT;
-		}
-
-		return ov5693_set_group_hold(info, &ae);
-		}
-
-	case _IOC_NR(OV5693_IOCTL_SET_FRAME_LENGTH):
-		return ov5693_set_frame_length(info, (u32)arg, true);
-
-	case _IOC_NR(OV5693_IOCTL_SET_COARSE_TIME):
-		return ov5693_set_coarse_time(info, (u32)arg,
-					OV5693_INVALID_COARSE_TIME, true);
-
-	case _IOC_NR(OV5693_IOCTL_SET_HDR_COARSE_TIME):
-	{
-		struct ov5693_hdr *hdrcoarse = (struct ov5693_hdr *)arg;
-		int ret = ov5693_set_coarse_time(info,
-				hdrcoarse->coarse_time_long,
-				hdrcoarse->coarse_time_short,
-				true);
-		return ret;
-	}
-
-	case _IOC_NR(OV5693_IOCTL_SET_GAIN):
-		return ov5693_set_gain(info, (u32)arg, true);
-
-	case _IOC_NR(OV5693_IOCTL_GET_FUSEID):
-	{
-		err = ov5693_get_fuse_id(info);
-
-		if (err) {
-			dev_err(&info->i2c_client->dev, "%s:Failed to get fuse id info.\n",
-			__func__);
-			return err;
-		}
-		if (copy_to_user((void __user *)arg,
-				&info->fuseid,
-				sizeof(struct nvc_fuseid))) {
-			dev_dbg(&info->i2c_client->dev, "%s:Fail copy fuse id to user space\n",
-				__func__);
-			return -EFAULT;
-		}
-		return 0;
-	}
-
-	case _IOC_NR(OV5693_IOCTL_READ_OTP_BANK):
-	{
-		struct ov5693_otp_bank bank;
-		if (copy_from_user(&bank,
-				   (const void __user *)arg,
-				   sizeof(bank))) {
-			dev_err(&info->i2c_client->dev,
-				"%s %d copy_from_user err\n",
-				__func__, __LINE__);
-			return -EINVAL;
-		}
-
-		err = ov5693_read_otp_bank(info, &bank);
-		if (err != 0)
-			return err;
-
-		if (copy_to_user((void __user *)arg,
-				 &bank,
-				 sizeof(bank))) {
-			dev_err(&info->i2c_client->dev,
-				"%s %d copy_to_user err\n",
-				__func__, __LINE__);
-			return -EFAULT;
-		}
-		return 0;
-	}
-
-	case _IOC_NR(OV5693_IOCTL_SET_CAL_DATA):
-	{
-		if (copy_from_user(&info->cal, (const void __user *)arg,
-					sizeof(info->cal))) {
-			dev_err(&info->i2c_client->dev,
-				"%s %d copy_from_user err\n",
-				__func__, __LINE__);
-			return -EINVAL;
-		}
-		return 0;
-	}
-
-	case _IOC_NR(OV5693_IOCTL_GET_EEPROM_DATA):
-		{
-			ov5693_read_eeprom(info,
-				0,
-				OV5693_EEPROM_SIZE,
-				info->eeprom_buf);
-
-			if (copy_to_user((void __user *)arg,
-				info->eeprom_buf, OV5693_EEPROM_SIZE)) {
-				dev_err(&info->i2c_client->dev,
-					"%s:Failed to copy status to user\n",
-					__func__);
-				return -EFAULT;
-			}
-		}
-		return 0;
-
-	case _IOC_NR(OV5693_IOCTL_SET_EEPROM_DATA):
-		{
-			int i;
-			if (copy_from_user(info->eeprom_buf,
-				(const void __user *)arg, OV5693_EEPROM_SIZE)) {
-				dev_err(&info->i2c_client->dev,
-						"%s:Failed to read from user buffer\n",
-						__func__);
-				return -EFAULT;
-			}
-			for (i = 0; i < OV5693_EEPROM_SIZE; i++) {
-				ov5693_write_eeprom(info,
-					i,
-					info->eeprom_buf[i]);
-				msleep(20);
-			}
-		}
-		return 0;
-
-	default:
-		dev_err(&info->i2c_client->dev, "%s unsupported ioctl: %x\n",
-			__func__, cmd);
-	}
-	return -EINVAL;
 }
 
 static void ov5693_sdata_init(struct ov5693_info *info)
@@ -3246,41 +3094,215 @@ static void ov5693_sdata_init(struct ov5693_info *info)
 		info->sdata.view_angle_v = info->pdata->lens_view_angle_v;
 }
 
-static int ov5693_open(struct inode *inode, struct file *file)
+static int ov5693_s_stream(struct v4l2_subdev *sd, int enable)
 {
-	int err;
-	struct miscdevice *miscdev = file->private_data;
-	struct ov5693_info *info = dev_get_drvdata(miscdev->parent);
+	struct ov5693_info *info = to_ov5693_info(sd);
+	int ret = 0;
 
-	if (atomic_xchg(&info->in_use, 1))
-		return -EBUSY;
+	pr_info("%s: enable=%d\n", __func__, enable);
 
-	file->private_data = info;
-	dev_dbg(&info->i2c_client->dev, "%s\n", __func__);
+	if (enable) {
+		if (!info->streaming) {
+			struct ov5693_mode mode = {
+				.res_x = info->format.width,
+				.res_y = info->format.height,
+				.hdr_en = false,
+			};
+			ret = ov5693_set_mode(info, &mode);
+			if (!ret)
+				info->streaming = true;
+		}
+	} else {
+		if (info->streaming) {
+			ret = ov5693_mode_able(info, false);
+			info->streaming = false;
+		}
+	}
 
-	err = ov5693_power_on(info, false);
-	return err;
+	return ret;
 }
 
-int ov5693_release(struct inode *inode, struct file *file)
+static int ov5693_enum_mbus_fmt(struct v4l2_subdev *sd,
+				unsigned int index,
+				enum v4l2_mbus_pixelcode *code)
 {
-	struct ov5693_info *info = file->private_data;
+	if (index >= 2)
+		return -EINVAL;
 
-	dev_dbg(&info->i2c_client->dev, "%s\n", __func__);
-	ov5693_pm_wr(info, NVC_PWR_OFF);
-	file->private_data = NULL;
-	WARN_ON(!atomic_xchg(&info->in_use, 0));
+	switch (index) {
+	case 0:
+		*code = V4L2_MBUS_FMT_SBGGR10_1X10;
+		break;
+	case 1:
+		*code = V4L2_MBUS_FMT_SBGGR8_1X8;
+		break;
+	}
+
 	return 0;
 }
 
-static const struct file_operations ov5693_fileops = {
-	.owner = THIS_MODULE,
-	.open = ov5693_open,
-	.unlocked_ioctl = ov5693_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl = ov5693_ioctl,
-#endif
-	.release = ov5693_release,
+static __maybe_unused int ov5693_g_mbus_fmt(struct v4l2_subdev *sd,
+			     struct v4l2_mbus_framefmt *mf)
+{
+	struct ov5693_info *info = to_ov5693_info(sd);
+
+	*mf = info->format;
+
+	return 0;
+}
+
+static int ov5693_s_mbus_fmt(struct v4l2_subdev *sd,
+			     struct v4l2_mbus_framefmt *mf)
+{
+	struct ov5693_info *info = to_ov5693_info(sd);
+
+	if (mf->width == 2592 && mf->height == 1944)
+		info->mode_index = OV5693_MODE_2592x1944;
+	else if (mf->width == 1920 && mf->height == 1080)
+		info->mode_index = OV5693_MODE_1920x1080;
+	else if (mf->width == 1296 && mf->height == 972)
+		info->mode_index = OV5693_MODE_1296x972;
+	else if (mf->width == 1280 && mf->height == 720)
+		info->mode_index = OV5693_MODE_1280x720_60FPS;
+	else
+		return -EINVAL;
+
+	if (mf->code != V4L2_MBUS_FMT_SBGGR10_1X10 &&
+	    mf->code != V4L2_MBUS_FMT_SBGGR8_1X8)
+		mf->code = V4L2_MBUS_FMT_SBGGR10_1X10;
+
+	mf->field = V4L2_FIELD_NONE;
+	mf->colorspace = V4L2_COLORSPACE_SRGB;
+
+	info->format = *mf;
+
+	return 0;
+}
+
+static int ov5693_try_mbus_fmt(struct v4l2_subdev *sd,
+			       struct v4l2_mbus_framefmt *mf)
+{
+	int mode;
+
+	if (mf->width >= 2592 && mf->height >= 1944)
+		mode = OV5693_MODE_2592x1944;
+	else if (mf->width >= 1920 && mf->height >= 1080)
+		mode = OV5693_MODE_1920x1080;
+	else if (mf->width >= 1296 && mf->height >= 972)
+		mode = OV5693_MODE_1296x972;
+	else
+		mode = OV5693_MODE_1280x720_60FPS;
+
+	switch (mode) {
+	case OV5693_MODE_2592x1944:
+		mf->width = 2592;
+		mf->height = 1944;
+		break;
+	case OV5693_MODE_1920x1080:
+		mf->width = 1920;
+		mf->height = 1080;
+		break;
+	case OV5693_MODE_1296x972:
+		mf->width = 1296;
+		mf->height = 972;
+		break;
+	case OV5693_MODE_1280x720_60FPS:
+		mf->width = 1280;
+		mf->height = 720;
+		break;
+	}
+
+	if (mf->code != V4L2_MBUS_FMT_SBGGR10_1X10 &&
+	    mf->code != V4L2_MBUS_FMT_SBGGR8_1X8)
+		mf->code = V4L2_MBUS_FMT_SBGGR10_1X10;
+
+	mf->field = V4L2_FIELD_NONE;
+	mf->colorspace = V4L2_COLORSPACE_SRGB;
+
+	return 0;
+}
+
+static int ov5693_g_mbus_config(struct v4l2_subdev *sd,
+				struct v4l2_mbus_config *cfg)
+{
+	cfg->flags = V4L2_MBUS_CSI2_4_LANE | V4L2_MBUS_CSI2_CHANNEL_0 |
+		     V4L2_MBUS_CSI2_CONTINUOUS_CLOCK;
+	cfg->type = V4L2_MBUS_CSI2;
+
+	return 0;
+}
+
+static int ov5693_cropcap(struct v4l2_subdev *sd, struct v4l2_cropcap *a)
+{
+	a->bounds.left		= 0;
+	a->bounds.top		= 0;
+	a->bounds.width		= 2592;
+	a->bounds.height	= 1944;
+	a->defrect		= a->bounds;
+	a->type			= V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	a->pixelaspect.numerator	= 1;
+	a->pixelaspect.denominator	= 1;
+
+	return 0;
+}
+
+static int ov5693_g_crop(struct v4l2_subdev *sd, struct v4l2_crop *a)
+{
+	a->c.left		= 0;
+	a->c.top		= 0;
+	a->c.width		= 2592;
+	a->c.height		= 1944;
+	a->type			= V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	return 0;
+}
+
+static int ov5693_g_chip_ident(struct v4l2_subdev *sd,
+			       struct v4l2_dbg_chip_ident *id)
+{
+	id->ident = V4L2_IDENT_OV5693;
+	id->revision = 0;
+
+	return 0;
+}
+
+static int ov5693_s_power(struct v4l2_subdev *sd, int on)
+{
+	struct ov5693_info *info = to_ov5693_info(sd);
+	int err = 0;
+
+	pr_info("%s: on=%d\n", __func__, on);
+
+	if (on) {
+		if (info->pdata->power_on)
+			err = info->pdata->power_on(&info->regulators);
+	} else {
+		if (info->pdata->power_off)
+			info->pdata->power_off(&info->regulators);
+		info->streaming = false;
+	}
+
+	return err;
+}
+
+static struct v4l2_subdev_video_ops ov5693_video_ops = {
+	.s_stream		= ov5693_s_stream,
+	.s_mbus_fmt		= ov5693_s_mbus_fmt,
+	.try_mbus_fmt		= ov5693_try_mbus_fmt,
+	.enum_mbus_fmt		= ov5693_enum_mbus_fmt,
+	.cropcap		= ov5693_cropcap,
+	.g_crop			= ov5693_g_crop,
+	.g_mbus_config		= ov5693_g_mbus_config,
+};
+
+static struct v4l2_subdev_core_ops ov5693_core_ops = {
+	.g_chip_ident		= ov5693_g_chip_ident,
+	.s_power		= ov5693_s_power,
+};
+
+static struct v4l2_subdev_ops ov5693_subdev_ops = {
+	.core			= &ov5693_core_ops,
+	.video			= &ov5693_video_ops,
 };
 
 static void ov5693_del(struct ov5693_info *info)
@@ -3294,7 +3316,7 @@ static int ov5693_remove(struct i2c_client *client)
 	struct ov5693_info *info = i2c_get_clientdata(client);
 
 	dev_dbg(&info->i2c_client->dev, "%s\n", __func__);
-	misc_deregister(&info->miscdev);
+	v4l2_device_unregister_subdev(&info->subdev);
 	sysedp_free_consumer(info->sysedpc);
 	ov5693_eeprom_device_release(info);
 	ov5693_del(info);
@@ -3532,16 +3554,16 @@ static int ov5693_probe(
 		snprintf(info->devname, sizeof(info->devname), "%s.%u",
 			 info->devname, info->pdata->num);
 
-	info->miscdev.name = info->devname;
-	info->miscdev.fops = &ov5693_fileops;
-	info->miscdev.minor = MISC_DYNAMIC_MINOR;
-	info->miscdev.parent = &client->dev;
-	if (misc_register(&info->miscdev)) {
-		dev_err(&client->dev, "%s unable to register misc device %s\n",
-			__func__, info->devname);
-		ov5693_del(info);
-		return -ENODEV;
-	}
+	v4l2_i2c_subdev_init(&info->subdev, client, &ov5693_subdev_ops);
+	info->subdev.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+
+	info->format.width = 2592;
+	info->format.height = 1944;
+	info->format.code = V4L2_MBUS_FMT_SBGGR10_1X10;
+	info->format.field = V4L2_FIELD_NONE;
+	info->format.colorspace = V4L2_COLORSPACE_SRGB;
+	info->mode_index = OV5693_MODE_2592x1944;
+	info->streaming = false;
 
 	pr_err("[OV5693]: end of probing sensor.\n");
 	return 0;

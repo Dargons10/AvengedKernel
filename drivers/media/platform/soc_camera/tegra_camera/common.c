@@ -32,6 +32,7 @@
 #include <media/soc_mediabus.h>
 #include <media/videobuf2-dma-contig.h>
 #include <media/tegra_v4l2_camera.h>
+#include <media/v4l2-device.h>
 
 #include "dev.h"
 #include "bus_client.h"
@@ -1018,6 +1019,11 @@ static int tegra_camera_probe(struct platform_device *pdev)
 	err = soc_camera_host_register(&cam->ici);
 	if (IS_ERR_VALUE(err))
 		goto exit_cleanup_alloc_ctx;
+
+	err = v4l2_device_register_subdev_nodes(&cam->ici.v4l2_dev);
+	if (err < 0)
+		dev_err(&pdev->dev, "%s: failed to register subdev nodes: %d\n",
+			__func__, err);
 
 	dev_notice(&pdev->dev, "Tegra camera driver loaded.\n");
 
