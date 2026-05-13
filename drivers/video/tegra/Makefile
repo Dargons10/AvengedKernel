@@ -11,4 +11,4 @@ obj-$(CONFIG_TEGRA_DC) += dc/
 obj-$(CONFIG_FB_TEGRA) += fb.o
 obj-$(CONFIG_ADF_TEGRA) += tegra_adf.o
 obj-$(CONFIG_TEGRA_NVMAP) += nvmap/
-obj-y += camera/
+obj-$(CONFIG_TEGRA_CAMERA) += camera/

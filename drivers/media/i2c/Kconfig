@@ -17,6 +17,8 @@ config VIDEO_IMX179_MOCHA
 	  This is a driver for the IMX179 camera sensor
 	  for use with the tegra isp on Xiaomi Mi Pad (mocha).
 
+endmenu
+
 menu "Sensors used on soc_camera driver"
 
 if SOC_CAMERA

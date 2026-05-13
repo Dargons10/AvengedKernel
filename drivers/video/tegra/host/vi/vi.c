@@ -242,6 +242,9 @@ vi_probe_fail:
 
 static int __exit vi_remove(struct platform_device *dev)
 {
+#ifdef CONFIG_TEGRA_CAMERA
+	int err = 0;
+#endif
 	struct nvhost_device_data *pdata = platform_get_drvdata(dev);
 	struct vi *tegra_vi = (struct vi *)pdata->private_data;
 
@@ -260,7 +263,6 @@ static int __exit vi_remove(struct platform_device *dev)
 	pdata->aperture[0] = NULL;
 
 #ifdef CONFIG_TEGRA_CAMERA
-	int err;
 	err = tegra_camera_unregister(tegra_vi->camera);
 	if (err)
 		return err;

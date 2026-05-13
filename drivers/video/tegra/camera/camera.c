@@ -13,10 +13,8 @@
  * GNU General Public License for more details.
  *
  */
-
-#ifdef CONFIG_TEGRA_CAMERA
-
 #include <linux/export.h>
+
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 
@@ -442,6 +440,4 @@ int tegra_camera_resume(struct tegra_camera *camera)
 	return 0;
 }
 EXPORT_SYMBOL(tegra_camera_resume);
-#endif /* CONFIG_PM */
-
-#endif /* CONFIG_TEGRA_CAMERA */
+#endif

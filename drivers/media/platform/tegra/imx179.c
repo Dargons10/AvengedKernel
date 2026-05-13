@@ -21,6 +21,7 @@
 #include <linux/fs.h>
 #include <linux/i2c.h>
 #include <linux/clk.h>
+#include <linux/miscdevice.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/regulator/consumer.h>
@@ -35,13 +36,8 @@
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/of_gpio.h>
-#include <media/v4l2-device.h>
-#include <media/v4l2-subdev.h>
-#include <media/v4l2-ctrls.h>
 
 #include "nvc_utilities.h"
-
-#define V4L2_IDENT_IMX179 179
 
 struct imx179_reg {
 	u16 addr;
@@ -49,8 +45,7 @@ struct imx179_reg {
 };
 
 struct imx179_info {
-	struct v4l2_subdev		subdev;
-	struct v4l2_mbus_framefmt	format;
+	struct miscdevice		miscdev_info;
 	int				mode;
 	struct imx179_power_rail	power;
 	struct imx179_otp               otp_data;
@@ -61,8 +56,7 @@ struct imx179_info {
 	struct regmap			*regmap;
 	struct mutex			imx179_camera_lock;
 	atomic_t			in_use;
-	struct sysedp_consumer		*sysedpc;
-	bool				streaming;
+	struct sysedp_consumer *sysedpc;
 };
 
 static const struct regmap_config sensor_regmap_config = {
@@ -70,11 +64,6 @@ static const struct regmap_config sensor_regmap_config = {
 	.val_bits = 8,
 	.cache_type = REGCACHE_RBTREE,
 };
-
-static struct imx179_info *to_imx179_info(struct v4l2_subdev *sd)
-{
-	return container_of(sd, struct imx179_info, subdev);
-}
 
 #define IMX179_TABLE_WAIT_MS 0
 #define IMX179_TABLE_END 1
@@ -405,7 +394,7 @@ imx179_write_table(struct imx179_info *info,
 	return 0;
 }
 
-static __maybe_unused int imx179_get_flash_cap(struct imx179_info *info)
+static int imx179_get_flash_cap(struct imx179_info *info)
 {
 	struct imx179_flash_control *fctl;
 
@@ -476,7 +465,7 @@ imx179_set_mode(struct imx179_info *info, struct imx179_mode *mode)
 	return 0;
 }
 
-static __maybe_unused int
+static int
 imx179_get_status(struct imx179_info *info, u8 *dev_status)
 {
 	*dev_status = 0;
@@ -571,7 +560,7 @@ imx179_set_gain(struct imx179_info *info, u16 gain, bool group_hold)
 	return 0;
 }
 
-static __maybe_unused int
+static int
 imx179_set_group_hold(struct imx179_info *info, struct imx179_ae *ae)
 {
 	int ret;
@@ -610,7 +599,7 @@ imx179_set_group_hold(struct imx179_info *info, struct imx179_ae *ae)
 	return 0;
 }
 
-static __maybe_unused int imx179_get_sensor_id(struct imx179_info *info)
+static int imx179_get_sensor_id(struct imx179_info *info)
 {
 	int ret = 0;
 
@@ -621,220 +610,7 @@ static __maybe_unused int imx179_get_sensor_id(struct imx179_info *info)
 	return ret;
 }
 
-static int imx179_s_stream(struct v4l2_subdev *sd, int enable)
-{
-	struct imx179_info *info = to_imx179_info(sd);
-	int ret = 0;
-
-	pr_info("%s: enable=%d\n", __func__, enable);
-
-	if (enable) {
-		if (!info->streaming) {
-			ret = imx179_set_mode(info, &((struct imx179_mode){
-				.xres = info->format.width,
-				.yres = info->format.height,
-				.frame_length = 0x9CE,
-				.coarse_time = 0x9CA,
-				.gain = 0x10,
-			}));
-			if (!ret)
-				info->streaming = true;
-		}
-	} else {
-		if (info->streaming) {
-			imx179_write_reg(info, 0x0100, 0x00);
-			info->streaming = false;
-		}
-	}
-
-	return ret;
-}
-
-static int imx179_enum_mbus_fmt(struct v4l2_subdev *sd,
-				unsigned int index,
-				enum v4l2_mbus_pixelcode *code)
-{
-	if (index >= 2)
-		return -EINVAL;
-
-	switch (index) {
-	case 0:
-		*code = V4L2_MBUS_FMT_SBGGR10_1X10;
-		break;
-	case 1:
-		*code = V4L2_MBUS_FMT_SBGGR8_1X8;
-		break;
-	}
-
-	return 0;
-}
-
-static int imx179_g_mbus_fmt(struct v4l2_subdev *sd,
-			     struct v4l2_mbus_framefmt *mf)
-{
-	struct imx179_info *info = to_imx179_info(sd);
-
-	*mf = info->format;
-
-	return 0;
-}
-
-static int imx179_s_mbus_fmt(struct v4l2_subdev *sd,
-			     struct v4l2_mbus_framefmt *mf)
-{
-	struct imx179_info *info = to_imx179_info(sd);
-
-	if (mf->width == 3280 && mf->height == 2460)
-		info->mode = IMX179_MODE_3280X2460;
-	else if (mf->width == 1920 && mf->height == 1080)
-		info->mode = IMX179_MODE_1920X1080;
-	else if (mf->width == 1280 && mf->height == 720)
-		info->mode = IMX179_MODE_1280X720_90FPS;
-	else
-		return -EINVAL;
-
-	if (mf->code != V4L2_MBUS_FMT_SBGGR10_1X10 &&
-	    mf->code != V4L2_MBUS_FMT_SBGGR8_1X8)
-		mf->code = V4L2_MBUS_FMT_SBGGR10_1X10;
-
-	mf->field = V4L2_FIELD_NONE;
-	mf->colorspace = V4L2_COLORSPACE_SRGB;
-
-	info->format = *mf;
-
-	return 0;
-}
-
-static int imx179_try_mbus_fmt(struct v4l2_subdev *sd,
-			       struct v4l2_mbus_framefmt *mf)
-{
-	int mode;
-
-	if (mf->width >= 3280 && mf->height >= 2460)
-		mode = IMX179_MODE_3280X2460;
-	else if (mf->width >= 1920 && mf->height >= 1080)
-		mode = IMX179_MODE_1920X1080;
-	else
-		mode = IMX179_MODE_1280X720_90FPS;
-
-	switch (mode) {
-	case IMX179_MODE_3280X2460:
-		mf->width = 3280;
-		mf->height = 2460;
-		break;
-	case IMX179_MODE_1920X1080:
-		mf->width = 1920;
-		mf->height = 1080;
-		break;
-	case IMX179_MODE_1280X720_90FPS:
-		mf->width = 1280;
-		mf->height = 720;
-		break;
-	}
-
-	if (mf->code != V4L2_MBUS_FMT_SBGGR10_1X10 &&
-	    mf->code != V4L2_MBUS_FMT_SBGGR8_1X8)
-		mf->code = V4L2_MBUS_FMT_SBGGR10_1X10;
-
-	mf->field = V4L2_FIELD_NONE;
-	mf->colorspace = V4L2_COLORSPACE_SRGB;
-
-	return 0;
-}
-
-static int imx179_g_mbus_config(struct v4l2_subdev *sd,
-				struct v4l2_mbus_config *cfg)
-{
-	cfg->flags = V4L2_MBUS_CSI2_4_LANE | V4L2_MBUS_CSI2_CHANNEL_0 |
-		     V4L2_MBUS_CSI2_CONTINUOUS_CLOCK;
-	cfg->type = V4L2_MBUS_CSI2;
-
-	return 0;
-}
-
-static int imx179_cropcap(struct v4l2_subdev *sd, struct v4l2_cropcap *a)
-{
-	a->bounds.left		= 0;
-	a->bounds.top		= 0;
-	a->bounds.width		= 3280;
-	a->bounds.height	= 2460;
-	a->defrect		= a->bounds;
-	a->type			= V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	a->pixelaspect.numerator	= 1;
-	a->pixelaspect.denominator	= 1;
-
-	return 0;
-}
-
-static int imx179_g_crop(struct v4l2_subdev *sd, struct v4l2_crop *a)
-{
-	a->c.left		= 0;
-	a->c.top		= 0;
-	a->c.width		= 3280;
-	a->c.height		= 2460;
-	a->type			= V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
-	return 0;
-}
-
-static int imx179_g_chip_ident(struct v4l2_subdev *sd,
-			       struct v4l2_dbg_chip_ident *id)
-{
-	id->ident = V4L2_IDENT_IMX179;
-	id->revision = 0;
-
-	return 0;
-}
-
-static void imx179_mclk_disable(struct imx179_info *info);
-static int imx179_mclk_enable(struct imx179_info *info);
-
-static int imx179_s_power(struct v4l2_subdev *sd, int on)
-{
-	struct imx179_info *info = to_imx179_info(sd);
-	int err = 0;
-
-	pr_info("%s: on=%d\n", __func__, on);
-
-	if (on) {
-		err = imx179_mclk_enable(info);
-		if (!err && info->pdata->power_on)
-			err = info->pdata->power_on(&info->power);
-		if (err < 0)
-			imx179_mclk_disable(info);
-	} else {
-		if (info->pdata->power_off)
-			info->pdata->power_off(&info->power);
-		imx179_mclk_disable(info);
-		sysedp_set_state(info->sysedpc, 0);
-		info->streaming = false;
-	}
-
-	return err;
-}
-
-static struct v4l2_subdev_video_ops imx179_video_ops = {
-	.s_stream		= imx179_s_stream,
-	.s_mbus_fmt		= imx179_s_mbus_fmt,
-	.g_mbus_fmt		= imx179_g_mbus_fmt,
-	.try_mbus_fmt		= imx179_try_mbus_fmt,
-	.enum_mbus_fmt		= imx179_enum_mbus_fmt,
-	.cropcap		= imx179_cropcap,
-	.g_crop			= imx179_g_crop,
-	.g_mbus_config		= imx179_g_mbus_config,
-};
-
-static struct v4l2_subdev_core_ops imx179_core_ops = {
-	.g_chip_ident		= imx179_g_chip_ident,
-	.s_power		= imx179_s_power,
-};
-
-static struct v4l2_subdev_ops imx179_subdev_ops = {
-	.core			= &imx179_core_ops,
-	.video			= &imx179_video_ops,
-};
-
-static __maybe_unused int imx179_get_otp_vendor(struct imx179_info *info)
+static int imx179_get_otp_vendor(struct imx179_info *info)
 {
 	int i;
 	u8 bak = 0;
@@ -872,7 +648,7 @@ static __maybe_unused int imx179_get_otp_vendor(struct imx179_info *info)
 	return 0;
 }
 
-static __maybe_unused int imx179_get_otp_data(struct imx179_info *info)
+static int imx179_get_otp_data(struct imx179_info *info)
 {
 	int ret = 0;
 	int i, j;
@@ -954,6 +730,138 @@ static int imx179_mclk_enable(struct imx179_info *info)
 	err = clk_set_rate(info->mclk, mclk_init_rate);
 	if (!err)
 		err = clk_prepare_enable(info->mclk);
+	return err;
+}
+
+static long
+imx179_ioctl(struct file *file,
+			 unsigned int cmd, unsigned long arg)
+{
+	int err = 0;
+	struct imx179_info *info = file->private_data;
+
+	switch (cmd) {
+	case IMX179_IOCTL_SET_POWER:
+		if (!info->pdata)
+			break;
+		if (arg && info->pdata->power_on) {
+			err = imx179_mclk_enable(info);
+			if (!err)
+				err = info->pdata->power_on(&info->power);
+			if (err < 0)
+				imx179_mclk_disable(info);
+		}
+		if (!arg && info->pdata->power_off) {
+			info->pdata->power_off(&info->power);
+			imx179_mclk_disable(info);
+			sysedp_set_state(info->sysedpc, 0);
+		}
+		break;
+	case IMX179_IOCTL_SET_MODE:
+	{
+		struct imx179_mode mode;
+		if (copy_from_user(&mode, (const void __user *)arg,
+			sizeof(struct imx179_mode))) {
+			pr_err("%s:Failed to get mode from user.\n", __func__);
+			return -EFAULT;
+		}
+		return imx179_set_mode(info, &mode);
+	}
+	case IMX179_IOCTL_SET_FRAME_LENGTH:
+		return imx179_set_frame_length(info, (u32)arg, true);
+	case IMX179_IOCTL_SET_COARSE_TIME:
+		return imx179_set_coarse_time(info, (u32)arg, true);
+	case IMX179_IOCTL_SET_GAIN:
+		return imx179_set_gain(info, (u16)arg, true);
+	case IMX179_IOCTL_GET_STATUS:
+	{
+		u8 status;
+
+		err = imx179_get_status(info, &status);
+		if (err)
+			return err;
+		if (copy_to_user((void __user *)arg, &status, 1)) {
+			pr_err("%s:Failed to copy status to user\n", __func__);
+			return -EFAULT;
+		}
+		return 0;
+	}
+	case IMX179_IOCTL_GET_SENSORDATA:
+	{
+		err = imx179_get_sensor_id(info);
+
+		if (err) {
+			pr_err("%s:Failed to get fuse id info.\n", __func__);
+			return err;
+		}
+		if (copy_to_user((void __user *)arg, &info->sensor_data,
+				sizeof(struct imx179_sensordata))) {
+			pr_info("%s:Failed to copy fuse id to user space\n",
+				__func__);
+			return -EFAULT;
+		}
+		return 0;
+	}
+	case IMX179_IOCTL_GET_OTPDATA:
+	{
+		err = imx179_get_otp_data(info);
+
+		if (err) {
+			pr_err("%s:Failed to get otp data.\n", __func__);
+			return err;
+		}
+		if (copy_to_user((void __user *)arg, &info->otp_data,
+				sizeof(struct imx179_otp))) {
+			pr_info("%s:Failed to copy otp data to user space\n",
+				__func__);
+			return -EFAULT;
+		}
+		return 0;
+	}
+	case IMX179_IOCTL_GET_OTPVEND:
+	{
+		err = imx179_get_otp_vendor(info);
+		if (copy_to_user((void __user *)arg, &info->otp_data,
+				sizeof(struct imx179_otp))) {
+			pr_info("%s:Failed to copy otp data to user space\n",
+				__func__);
+			return -EFAULT;
+		}
+		return 0;
+	}
+	case IMX179_IOCTL_SET_GROUP_HOLD:
+	{
+		struct imx179_ae ae;
+		if (copy_from_user(&ae, (const void __user *)arg,
+			sizeof(struct imx179_ae))) {
+			pr_info("%s:fail group hold\n", __func__);
+			return -EFAULT;
+		}
+		return imx179_set_group_hold(info, &ae);
+	}
+	case IMX179_IOCTL_SET_FLASH_MODE:
+	{
+		struct imx179_flash_control values;
+
+		dev_dbg(&info->i2c_client->dev,
+			"IMX179_IOCTL_SET_FLASH_MODE\n");
+		if (copy_from_user(&values,
+			(const void __user *)arg,
+			sizeof(struct imx179_flash_control))) {
+			err = -EFAULT;
+			break;
+		}
+		err = imx179_set_flash_control(info, &values);
+		break;
+	}
+	case IMX179_IOCTL_GET_FLASH_CAP:
+		err = imx179_get_flash_cap(info);
+		break;
+	default:
+		pr_err("%s:unknown cmd.\n", __func__);
+		err = -EINVAL;
+	}
+
 	return err;
 }
 
@@ -1067,6 +975,36 @@ static int imx179_power_off(struct imx179_power_rail *pw)
 	return 0;
 }
 
+static int
+imx179_open(struct inode *inode, struct file *file)
+{
+	struct miscdevice	*miscdev = file->private_data;
+	struct imx179_info *info;
+
+	info = container_of(miscdev, struct imx179_info, miscdev_info);
+	/* check if the device is in use */
+	if (atomic_xchg(&info->in_use, 1)) {
+		pr_info("%s:BUSY!\n", __func__);
+		return -EBUSY;
+	}
+
+	file->private_data = info;
+
+	return 0;
+}
+
+static int
+imx179_release(struct inode *inode, struct file *file)
+{
+	struct imx179_info *info = file->private_data;
+
+	file->private_data = NULL;
+
+	/* warn if device is already released */
+	WARN_ON(!atomic_xchg(&info->in_use, 0));
+	return 0;
+}
+
 static int imx179_power_put(struct imx179_power_rail *pw)
 {
 	if (unlikely(!pw))
@@ -1128,6 +1066,19 @@ static int imx179_power_get(struct imx179_info *info)
 	return err;
 }
 
+static const struct file_operations imx179_fileops = {
+	.owner = THIS_MODULE,
+	.open = imx179_open,
+	.unlocked_ioctl = imx179_ioctl,
+	.release = imx179_release,
+};
+
+static struct miscdevice imx179_device = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "imx179",
+	.fops = &imx179_fileops,
+};
+
 static struct of_device_id imx179_of_match[] = {
 	{ .compatible = "nvidia,imx179", },
 	{ },
@@ -1171,6 +1122,7 @@ imx179_probe(struct i2c_client *client,
 			const struct i2c_device_id *id)
 {
 	struct imx179_info *info;
+	int err;
 	const char *mclk_name;
 
 	pr_err("[IMX179]: probing sensor.\n");
@@ -1214,16 +1166,15 @@ imx179_probe(struct i2c_client *client,
 
 	imx179_power_get(info);
 
-	v4l2_i2c_subdev_init(&info->subdev, client, &imx179_subdev_ops);
-	info->subdev.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
+	memcpy(&info->miscdev_info,
+		&imx179_device,
+		sizeof(struct miscdevice));
 
-	info->format.width = 3280;
-	info->format.height = 2460;
-	info->format.code = V4L2_MBUS_FMT_SBGGR10_1X10;
-	info->format.field = V4L2_FIELD_NONE;
-	info->format.colorspace = V4L2_COLORSPACE_SRGB;
-	info->mode = IMX179_MODE_3280X2460;
-	info->streaming = false;
+	err = misc_register(&info->miscdev_info);
+	if (err) {
+		pr_err("%s:Unable to register misc device!\n", __func__);
+		goto imx179_probe_fail;
+	}
 
 	i2c_set_clientdata(client, info);
 
@@ -1233,6 +1184,11 @@ imx179_probe(struct i2c_client *client,
 
 	pr_err("[IMX179]: end of probing sensor.\n");
 	return 0;
+
+imx179_probe_fail:
+	imx179_power_put(&info->power);
+
+	return err;
 }
 
 static int
@@ -1241,7 +1197,7 @@ imx179_remove(struct i2c_client *client)
 	struct imx179_info *info;
 	info = i2c_get_clientdata(client);
 	sysedp_free_consumer(info->sysedpc);
-	v4l2_device_unregister_subdev(&info->subdev);
+	misc_deregister(&imx179_device);
 	mutex_destroy(&info->imx179_camera_lock);
 
 	imx179_power_put(&info->power);
