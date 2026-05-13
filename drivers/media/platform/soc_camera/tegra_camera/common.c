@@ -43,7 +43,7 @@
 static int tpg_mode;
 module_param(tpg_mode, int, 0644);
 
-#define TEGRA_CAM_DRV_NAME "tegra-vi"
+#define TEGRA_CAM_DRV_NAME "vi"
 #define TEGRA_CAM_VERSION_CODE KERNEL_VERSION(0, 0, 5)
 
 static const struct soc_mbus_pixelfmt tegra_camera_yuv_formats[] = {
