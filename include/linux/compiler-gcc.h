@@ -9,6 +9,9 @@
 		   + __GNUC_MINOR__ * 100 \
 		   + __GNUC_PATCHLEVEL__)
 
+/* __COUNTER__ was added in GCC 4.3 */
+
+
 
 /* Optimization barrier */
 /* The "volatile" is due to gcc bugs */

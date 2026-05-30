@@ -1,6 +1,11 @@
 #ifndef __LINUX_COMPILER_H
 #define __LINUX_COMPILER_H
 
+/* Define __COUNTER__ if not available - for GCC >= 4.3 */
+#ifndef __COUNTER__
+#define __COUNTER__ __LINE__
+#endif
+
 #ifndef __ASSEMBLY__
 
 #ifdef __CHECKER__

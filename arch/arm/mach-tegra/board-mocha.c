@@ -742,7 +742,8 @@ static struct of_dev_auxdata ardbeg_auxdata_lookup[] __initdata = {
 																#endif
 																OF_DEV_AUXDATA("nvidia,tegra124-msenc", TEGRA_MSENC_BASE, "msenc",
 																			   NULL),
-																			   OF_DEV_AUXDATA("nvidia,tegra124-vi", TEGRA_VI_BASE, "vi.0", NULL),
+																OF_DEV_AUXDATA("nvidia,tegra124-vi", TEGRA_VI_BASE, "vi.0", NULL),
+																			   OF_DEV_AUXDATA("nvidia,mocha-vi", TEGRA_VI_BASE, "tegra-vi", NULL),
 																			   OF_DEV_AUXDATA("nvidia,tegra124-isp", TEGRA_ISP_BASE, "isp.0", NULL),
 																			   OF_DEV_AUXDATA("nvidia,tegra124-isp", TEGRA_ISPB_BASE, "isp.1", NULL),
 																			   OF_DEV_AUXDATA("nvidia,tegra124-pwm", TEGRA_PWFM_BASE, "tegra-pwm", NULL),
@@ -1093,6 +1094,31 @@ static void __init tegra_mocha_dt_init(void)
 	of_platform_populate(NULL,
 						 of_default_bus_match_table, ardbeg_auxdata_lookup,
 					  &platform_bus);
+
+	/*
+	 * Explicitly register mocha-vi platform device since nvhost host1x
+	 * driver does not enumerate DT children. This ensures our V4L2 VI
+	 * driver can probe.
+	 */
+	{
+		static struct resource mocha_vi_resources[] = {
+			{
+				.start = TEGRA_VI_BASE,
+				.end = TEGRA_VI_BASE + 0x10000 - 1,
+				.flags = IORESOURCE_MEM,
+			},
+		};
+		struct platform_device *pdev;
+
+		pdev = platform_device_register_simple("tegra-vi", -1,
+						       mocha_vi_resources,
+						       ARRAY_SIZE(mocha_vi_resources));
+		if (IS_ERR(pdev))
+			pr_err("Failed to register mocha-vi platform device\n");
+		else
+			pr_info("Registered mocha-vi platform device at 0x%08lx\n",
+				(unsigned long)TEGRA_VI_BASE);
+	}
 	#endif
 	tegra_get_board_info(&board_info);
 	pr_info("board_info: id:sku:fab:major:minor = 0x%04x:0x%04x:0x%02x:0x%02x:0x%02x\n",

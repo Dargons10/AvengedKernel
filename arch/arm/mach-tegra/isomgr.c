@@ -193,11 +193,7 @@ static struct isoclient_info tegra12x_isoclients[] = {
 		.client = TEGRA_ISO_CLIENT_VI_0,
 		.name = "vi_0",
 		.dev_name = "tegra_vi.0",
-		.emc_clk_name = "emc",
-	},
-	{
-		.client = TEGRA_ISO_CLIENT_VI_1,
-		.name = "vi_1",
+
 		.dev_name = "tegra_vi.1",
 		.emc_clk_name = "emc",
 	},

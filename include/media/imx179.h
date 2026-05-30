@@ -1,98 +1,48 @@
 /*
-* Copyright (c) 2012-2014, NVIDIA Corporation.  All rights reserved.
-* Copyright (C) 2016 XiaoMi, Inc.
-*
-* This program is free software; you can redistribute it and/or modify it
-* under the terms and conditions of the GNU General Public License,
-* version 2, as published by the Free Software Foundation.
-*
-* This program is distributed in the hope it will be useful, but WITHOUT
-* ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-* FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-* more details.
-*
-* You should have received a copy of the GNU General Public License
-* along with this program.  If not, see <http:
-*/
+ * include/media/imx179.h - Sony IMX179 sensor platform data
+ *
+ * Copyright (c) 2026, Dargons10
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms and conditions of the GNU General Public License,
+ * version 2, as published by the Free Software Foundation.
+ */
 
 #ifndef __IMX179_H__
 #define __IMX179_H__
 
-#include <linux/ioctl.h>  /* For IOCTL macros */
-#include <linux/edp.h>
-#include <media/nvc.h>
-#include <media/nvc_image.h>
+#include <linux/videodev2.h>
 
-#define IMX179_IOCTL_SET_MODE		_IOW('o', 1, struct imx179_mode)
-#define IMX179_IOCTL_GET_STATUS		_IOR('o', 2, __u8)
-#define IMX179_IOCTL_SET_FRAME_LENGTH	_IOW('o', 3, __u32)
-#define IMX179_IOCTL_SET_COARSE_TIME	_IOW('o', 4, __u32)
-#define IMX179_IOCTL_SET_GAIN		_IOW('o', 5, __u16)
-#define IMX179_IOCTL_GET_SENSORDATA	_IOR('o', 6, struct imx179_sensordata)
-#define IMX179_IOCTL_SET_GROUP_HOLD	_IOW('o', 7, struct imx179_ae)
-#define IMX179_IOCTL_GET_OTPDATA        _IOR('o', 8, struct imx179_otp)
-#define IMX179_IOCTL_GET_OTPVEND        _IOR('o', 9, struct imx179_otp)
-#define IMX179_IOCTL_SET_POWER		_IOW('o', 20, __u32)
-#define IMX179_IOCTL_GET_FLASH_CAP	_IOR('o', 30, __u32)
-#define IMX179_IOCTL_SET_FLASH_MODE 	_IOW('o', 31, \
-						struct imx179_flash_control)
+#define IMX179_DRIVER_NAME "imx179"
+#define IMX179_I2C_ADDR    0x10
+#define IMX179_CHIP_ID     0x0179
 
-struct imx179_mode {
-	int xres;
-	int yres;
-	__u32 frame_length;
-	__u32 coarse_time;
-	__u16 gain;
-};
+/* Default resolution */
+#define IMX179_DEFAULT_WIDTH  3264
+#define IMX179_DEFAULT_HEIGHT 2448
 
-struct imx179_ae {
-	__u32 frame_length;
-	__u8  frame_length_enable;
-	__u32 coarse_time;
-	__u8  coarse_time_enable;
-	__s32 gain;
-	__u8  gain_enable;
-};
+/* Pixel formats supported */
+#define IMX179_DEFAULT_FMT    MEDIA_BUS_FMT_SRGGB10_1X10
 
-struct imx179_sensordata {
-	__u32 fuse_id_size;
-	__u8  fuse_id[16];
-};
+/* Clock frequency */
+#define IMX179_MCLK_FREQ      24000000
 
-struct imx179_otp {
-    __u32 otp_size;
-    __u8  otp_data[803];
-};
-struct imx179_flash_control {
-	u8 enable;
-	u8 edge_trig_en;
-	u8 start_edge;
-	u8 repeat;
-	u16 delay_frm;
-};
-
-
-#ifdef __KERNEL__
-struct imx179_power_rail {
-	struct regulator *dvdd;
-	struct regulator *avdd;
-	struct regulator *iovdd;
-	struct regulator *ext_reg1;
-	struct regulator *ext_reg2;
-	struct regulator *ext_reg3;
-};
+/* Frame rates */
+#define IMX179_DEFAULT_FPS    30
 
 struct imx179_platform_data {
-	struct imx179_flash_control flash_cap;
-	const char *mclk_name; /* NULL for default default_mclk */
-	struct edp_client edpc_config;
-	unsigned int cam1_gpio;
-	unsigned int reset_gpio;
-	unsigned int af_gpio;
-	bool ext_reg;
-	int (*power_on)(struct imx179_power_rail *pw);
-	int (*power_off)(struct imx179_power_rail *pw);
-};
-#endif /* __KERNEL__ */
+    int reset_gpio;
+    int pwdn_gpio;
+    int af_gpio;
 
-#endif  /* __IMX179_H__ */
+    const char *vana_reg;  /* 2.7V analog */
+    const char *vdig_reg;  /* 1.8V digital */
+    const char *vif_reg;   /* 1.2V interface */
+
+    int csi_port;
+    int num_lanes;
+
+    unsigned long mclk_freq;
+};
+
+#endif /* __IMX179_H__ */
