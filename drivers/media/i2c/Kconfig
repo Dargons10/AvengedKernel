@@ -4,21 +4,6 @@
 
 if VIDEO_V4L2
 
-config VIDEO_IR_I2C
-	tristate "I2C IR receiver"
-	depends on VIDEO_V4L2 && I2C
-	---help---
-	  Support for I2C IR receiver.
-
-config VIDEO_IMX179_MOCHA
-	tristate "IMX179 camera sensor support for Mocha"
-	depends on I2C && ARCH_TEGRA
-	---help---
-	  This is a driver for the IMX179 camera sensor
-	  for use with the tegra isp on Xiaomi Mi Pad (mocha).
-
-endmenu
-
 menu "Sensors used on soc_camera driver"
 
 if SOC_CAMERA

@@ -264,3 +264,6 @@ config CAMERA_COMMON
 	---help---
 	  This provides common camera infrastructure for Tegra
 	  platforms including media controller support.
+
+# V4L2 subdev drivers for modern camera pipeline
+source "drivers/media/platform/tegra/v4l2/Kconfig"
