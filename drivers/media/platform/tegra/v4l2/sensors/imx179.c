@@ -489,6 +489,12 @@ static int imx179_set_fmt(struct v4l2_subdev *sd,
     if (i == IMX179_NUM_FRAMESIZES) {
         fmt->format.width = IMX179_DEFAULT_WIDTH;
         fmt->format.height = IMX179_DEFAULT_HEIGHT;
+        /* Find the fallback entry index */
+        for (i = 0; i < IMX179_NUM_FRAMESIZES; i++) {
+            if (imx179_framesizes[i].width == IMX179_DEFAULT_WIDTH &&
+                imx179_framesizes[i].height == IMX179_DEFAULT_HEIGHT)
+                break;
+        }
     }
 
     fmt->format.field = V4L2_FIELD_NONE;
@@ -531,6 +537,7 @@ static int imx179_s_stream(struct v4l2_subdev *sd, int enable)
             if (use_binning) {
                 binned_w = out_width * 2;
                 binned_h = out_height * 2;
+                imx179_write_reg(imx179, 0x0301, 0x05); /* binning timing mode */
                 imx179_write_reg(imx179, 0x0383, 0x01);
                 imx179_write_reg(imx179, 0x0385, 0x01);
                 imx179_write_reg(imx179, 0x0387, 0x01);
@@ -538,6 +545,7 @@ static int imx179_s_stream(struct v4l2_subdev *sd, int enable)
             } else {
                 binned_w = out_width;
                 binned_h = out_height;
+                imx179_write_reg(imx179, 0x0301, 0x00); /* normal readout mode */
                 imx179_write_reg(imx179, 0x0383, 0x00);
                 imx179_write_reg(imx179, 0x0385, 0x00);
                 imx179_write_reg(imx179, 0x0387, 0x00);
@@ -571,9 +579,9 @@ static int imx179_s_stream(struct v4l2_subdev *sd, int enable)
             imx179_write_reg(imx179, 0x0342, 0x0D);  /* 3440 >> 8 */
             imx179_write_reg(imx179, 0x0343, 0x70);  /* 3440 & 0xFF */
             /* Set default exposure and gain */
-            imx179_write_reg(imx179, 0x0202, 0x04);  /* 1250 >> 8 */
-            imx179_write_reg(imx179, 0x0203, 0xE2);  /* 1250 & 0xFF */
-            imx179_write_reg(imx179, 0x0205, 0xC0);  /* gain = 192 (6x) */
+            imx179_write_reg(imx179, 0x0202, 0x09);  /* 2400 >> 8 */
+            imx179_write_reg(imx179, 0x0203, 0x60);  /* 2400 & 0xFF */
+            imx179_write_reg(imx179, 0x0205, 0x80);  /* gain = 128 (~4x, compensa interiores) */
             pr_info("Output %dx%d window [%d,%d]-[%d,%d]%s\n",
                     out_width, out_height,
                     start_x, start_y, end_x, end_y,
@@ -771,9 +779,9 @@ static int imx179_probe(struct i2c_client *client,
     v4l2_ctrl_handler_init(&imx179->ctrl_handler, 4);
 
     imx179->exposure = v4l2_ctrl_new_std(&imx179->ctrl_handler, &imx179_ctrl_ops,
-                                          V4L2_CID_EXPOSURE, 1, 2500, 1, 1250);
+                                          V4L2_CID_EXPOSURE, 1, 2500, 1, 2400);
     imx179->gain = v4l2_ctrl_new_std(&imx179->ctrl_handler, &imx179_ctrl_ops,
-                                      V4L2_CID_GAIN, 0, 0xFF, 1, 0xC0);
+                                        V4L2_CID_GAIN, 0, 0xFF, 1, 0x80);
     imx179->pixel_rate = v4l2_ctrl_new_std(&imx179->ctrl_handler, &imx179_ctrl_ops,
                                             V4L2_CID_PIXEL_RATE, 0, IMX179_PIXEL_RATE, 1, IMX179_PIXEL_RATE);
 
