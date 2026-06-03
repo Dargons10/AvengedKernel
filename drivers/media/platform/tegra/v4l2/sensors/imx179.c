@@ -581,7 +581,7 @@ static int imx179_s_stream(struct v4l2_subdev *sd, int enable)
             /* Set default exposure and gain */
             imx179_write_reg(imx179, 0x0202, 0x09);  /* 2400 >> 8 */
             imx179_write_reg(imx179, 0x0203, 0x60);  /* 2400 & 0xFF */
-            imx179_write_reg(imx179, 0x0205, 0x80);  /* gain = 128 (~4x, compensa interiores) */
+            imx179_write_reg(imx179, 0x0205, 0x40);  /* gain = 64 (~2x, reduce ruido) */
             pr_info("Output %dx%d window [%d,%d]-[%d,%d]%s\n",
                     out_width, out_height,
                     start_x, start_y, end_x, end_y,
@@ -781,7 +781,7 @@ static int imx179_probe(struct i2c_client *client,
     imx179->exposure = v4l2_ctrl_new_std(&imx179->ctrl_handler, &imx179_ctrl_ops,
                                           V4L2_CID_EXPOSURE, 1, 2500, 1, 2400);
     imx179->gain = v4l2_ctrl_new_std(&imx179->ctrl_handler, &imx179_ctrl_ops,
-                                        V4L2_CID_GAIN, 0, 0xFF, 1, 0x80);
+                                        V4L2_CID_GAIN, 0, 0xFF, 1, 0x40);
     imx179->pixel_rate = v4l2_ctrl_new_std(&imx179->ctrl_handler, &imx179_ctrl_ops,
                                             V4L2_CID_PIXEL_RATE, 0, IMX179_PIXEL_RATE, 1, IMX179_PIXEL_RATE);
 

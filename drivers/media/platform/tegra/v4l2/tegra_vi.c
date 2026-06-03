@@ -1599,8 +1599,10 @@ static int tegra_vi_capture_thread(void *data)
     int sensor_failures = 0;
     int max_sensor_failures = 5;
 
-    pr_info("VI capture thread started (channel %d) - %s mode\n",
-            ch, use_sensor ? "SENSOR HW" : "TPG fallback");
+    pr_info("VI capture thread started (channel %d) - %s mode, buf_queue=%s, streaming=%d\n",
+            ch, use_sensor ? "SENSOR HW" : "TPG fallback",
+            list_empty(&vi->buf_queue) ? "EMPTY" : "HAS_BUFFERS",
+            vi->streaming);
 
     while (!kthread_should_stop()) {
         ret = wait_event_interruptible(vi->capture_wait,
@@ -1640,26 +1642,30 @@ static int tegra_vi_capture_thread(void *data)
         if (use_sensor && !vi->channels[ch].sensor_dead &&
             sensor_failures < max_sensor_failures) {
             /* ===== SENSOR (HW) PATH ===== */
-            if (first_frame) {
-                ret = tegra_vi_sensor_start(vi, ch);
-                if (ret) {
-                    pr_warn("Sensor start failed, falling back to TPG: %d\n", ret);
-                    sensor_failures = max_sensor_failures;
-                    vi->channels[ch].sensor_dead = true;
-                    goto do_tpg;
-                }
+		if (first_frame) {
+			/* Power on focuser (VCM) FIRST so it settles during sensor init */
+			if (vi->channels[ch].focuser_sd) {
+				struct v4l2_subdev *focuser = vi->channels[ch].focuser_sd;
+				struct v4l2_ctrl *ctrl;
+				v4l2_subdev_call(focuser, core, s_power, 1);
+				ctrl = v4l2_ctrl_find(focuser->ctrl_handler, V4L2_CID_FOCUS_ABSOLUTE);
+				if (ctrl) {
+					v4l2_ctrl_s_ctrl(ctrl, 400);
+					pr_info("Focuser set to position 400 on channel %d\n", ch);
+				}
+				msleep(30); /* Let VCM start moving - sensor_start's 100ms delay finishes settling */
+			}
 
-                /* Power on focuser (VCM) and set lens to mid position for general focus */
-                if (vi->channels[ch].focuser_sd) {
-                    struct v4l2_subdev *focuser = vi->channels[ch].focuser_sd;
-                    struct v4l2_ctrl *ctrl;
-                    v4l2_subdev_call(focuser, core, s_power, 1);
-                    ctrl = v4l2_ctrl_find(focuser->ctrl_handler, V4L2_CID_FOCUS_ABSOLUTE);
-                    if (ctrl) {
-                        v4l2_ctrl_s_ctrl(ctrl, 640);
-                        pr_info("Focuser set to position 640 on channel %d\n", ch);
-                    }
-                }
+			ret = tegra_vi_sensor_start(vi, ch);
+			if (ret) {
+				/* Power off focuser since sensor failed */
+				if (vi->channels[ch].focuser_sd)
+					v4l2_subdev_call(vi->channels[ch].focuser_sd, core, s_power, 0);
+				pr_warn("Sensor start failed, falling back to TPG: %d\n", ret);
+				sensor_failures = max_sensor_failures;
+				vi->channels[ch].sensor_dead = true;
+				goto do_tpg;
+			}
 
                 /* Configurar CSI PHY + pixel parser + VI capture registers */
                 ret = tegra_vi_setup_csi_channel(vi, ch);
