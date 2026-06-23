@@ -848,7 +848,7 @@ static int tegra_vi_streamoff(struct file *file, void *priv,
     return ret;
 }
 
-/* Forward V4L2 controls to the sensor subdev (exposure, gain, etc.) */
+/* Forward V4L2 controls to the sensor or focuser subdev */
 static int tegra_vi_s_ctrl(struct file *file, void *fh, struct v4l2_control *ctrl)
 {
     struct tegra_vi_vdev_data *data = video_drvdata(file);
@@ -860,6 +860,18 @@ static int tegra_vi_s_ctrl(struct file *file, void *fh, struct v4l2_control *ctr
         return -EINVAL;
     }
     chan = &data->vi->channels[data->channel];
+
+    /* Try focuser first (V4L2_CID_FOCUS_ABSOLUTE) */
+    if (chan->focuser_sd && chan->focuser_sd->ctrl_handler) {
+        ret = v4l2_s_ctrl(NULL, chan->focuser_sd->ctrl_handler, ctrl);
+        if (ret != -EINVAL) {
+            pr_info("s_ctrl ch%d id=%d val=%d (focuser) -> ret=%d\n",
+                    data->channel, ctrl->id, ctrl->value, ret);
+            return ret;
+        }
+    }
+
+    /* Fall back to sensor subdev (exposure, gain, etc.) */
     if (!chan->sensor_sd) {
         pr_err("s_ctrl ch%d: sensor_sd is NULL\n", data->channel);
         return -EINVAL;
@@ -869,7 +881,7 @@ static int tegra_vi_s_ctrl(struct file *file, void *fh, struct v4l2_control *ctr
         return -EINVAL;
     }
     ret = v4l2_s_ctrl(NULL, chan->sensor_sd->ctrl_handler, ctrl);
-    pr_info("s_ctrl ch%d id=%d val=%d -> ret=%d\n",
+    pr_info("s_ctrl ch%d id=%d val=%d (sensor) -> ret=%d\n",
             data->channel, ctrl->id, ctrl->value, ret);
     return ret;
 }
@@ -885,6 +897,18 @@ static int tegra_vi_g_ctrl(struct file *file, void *fh, struct v4l2_control *ctr
         return -EINVAL;
     }
     chan = &data->vi->channels[data->channel];
+
+    /* Try focuser first */
+    if (chan->focuser_sd && chan->focuser_sd->ctrl_handler) {
+        ret = v4l2_g_ctrl(chan->focuser_sd->ctrl_handler, ctrl);
+        if (ret != -EINVAL) {
+            pr_info("g_ctrl ch%d id=%d val=%d (focuser) -> ret=%d\n",
+                    data->channel, ctrl->id, ctrl->value, ret);
+            return ret;
+        }
+    }
+
+    /* Fall back to sensor subdev */
     if (!chan->sensor_sd) {
         pr_err("g_ctrl ch%d: sensor_sd is NULL\n", data->channel);
         return -EINVAL;
@@ -894,7 +918,7 @@ static int tegra_vi_g_ctrl(struct file *file, void *fh, struct v4l2_control *ctr
         return -EINVAL;
     }
     ret = v4l2_g_ctrl(chan->sensor_sd->ctrl_handler, ctrl);
-    pr_info("g_ctrl ch%d id=%d val=%d -> ret=%d\n",
+    pr_info("g_ctrl ch%d id=%d val=%d (sensor) -> ret=%d\n",
             data->channel, ctrl->id, ctrl->value, ret);
     return ret;
 }

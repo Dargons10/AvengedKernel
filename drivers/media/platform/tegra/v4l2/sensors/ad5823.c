@@ -30,31 +30,25 @@
 #include "../tegra_vi.h"
 #include <media/v4l2-of.h>
 
-/* AD5823 registers */
-#define AD5823_REG_CTRL         0x02
-#define AD5823_REG_VCM_LSB      0x04
-#define AD5823_REG_VCM_MSB      0x05
-#define AD5823_REG_SLEW         0x06
-
-#define AD5823_CTRL_ENABLE      0x01
-#define AD5823_CTRL_DISABLE     0x00
+/* AD5823 does not respond on I2C — no AD5823 chip on this hardware.
+ * Focus position is stored but not written to HW.
+ * GPIO 223 (CAM_AF_PWDN) is managed by IMX179 driver.
+ * Regulators are shared with IMX179.
+ */
 
 #define AD5823_FOCUS_MIN        0
 #define AD5823_FOCUS_MAX        1023
 #define AD5823_FOCUS_STEP       1
 #define AD5823_FOCUS_DEFAULT    0
 
-/* Focuser state */
+/* Focuser state — I2C writes disabled; AD5823 chip not present on HW */
 struct ad5823 {
     struct v4l2_subdev sd;
     struct media_pad pad;
     struct v4l2_ctrl_handler ctrl_handler;
 
-    struct i2c_client *i2c_client;
-
     struct regulator *vdd;
     struct regulator *vdd_i2c;
-    int enable_gpio;
 
     bool powered;
     u16 current_focus;
@@ -65,36 +59,10 @@ static inline struct ad5823 *to_ad5823(struct v4l2_subdev *sd)
     return container_of(sd, struct ad5823, sd);
 }
 
-static int ad5823_write_reg(struct ad5823 *ad5823, u8 reg, u8 val)
-{
-    struct i2c_client *client = ad5823->i2c_client;
-    u8 buf[2];
-
-    buf[0] = reg;
-    buf[1] = val;
-
-    if (i2c_master_send(client, buf, 2) != 2)
-        return -EIO;
-
-    return 0;
-}
-
 static int ad5823_set_focus(struct ad5823 *ad5823, u16 position)
 {
-    int ret;
-
-    if (!ad5823->powered)
-        return 0;
-
     ad5823->current_focus = position;
-
-    ret = ad5823_write_reg(ad5823, AD5823_REG_VCM_LSB,
-                            position & 0xff);
-    if (ret)
-        return ret;
-
-    return ad5823_write_reg(ad5823, AD5823_REG_VCM_MSB,
-                             (position >> 8) & 0xff);
+    return 0;
 }
 
 static int ad5823_s_power(struct v4l2_subdev *sd, int on)
@@ -106,65 +74,36 @@ static int ad5823_s_power(struct v4l2_subdev *sd, int on)
         if (ad5823->powered)
             return 0;
 
+        /* Enable regulators (IMX179 manages GPIO PWDN) */
         if (!IS_ERR(ad5823->vdd)) {
             ret = regulator_enable(ad5823->vdd);
             if (ret)
                 return ret;
         }
-
         if (!IS_ERR_OR_NULL(ad5823->vdd_i2c)) {
             ret = regulator_enable(ad5823->vdd_i2c);
-            if (ret)
-                goto err_vdd;
+            if (ret) {
+                if (!IS_ERR(ad5823->vdd))
+                    regulator_disable(ad5823->vdd);
+                return ret;
+            }
         }
-
-        usleep_range(1000, 2000);
-
-        if (gpio_is_valid(ad5823->enable_gpio)) {
-            gpio_set_value(ad5823->enable_gpio, 1);
-            usleep_range(1000, 2000);
-        }
-
-        ret = ad5823_write_reg(ad5823, AD5823_REG_CTRL, AD5823_CTRL_ENABLE);
-        if (ret)
-            goto err_gpio;
-
-        ret = ad5823_write_reg(ad5823, AD5823_REG_SLEW, 0x03);
-        if (ret)
-            goto err_gpio;
 
         ad5823->powered = true;
-        pr_info("Focuser powered on\n");
+        ad5823_set_focus(ad5823, ad5823->current_focus);
     } else {
         if (!ad5823->powered)
             return 0;
 
-        ad5823_write_reg(ad5823, AD5823_REG_CTRL, AD5823_CTRL_DISABLE);
-
-        if (gpio_is_valid(ad5823->enable_gpio))
-            gpio_set_value(ad5823->enable_gpio, 0);
-
         if (!IS_ERR_OR_NULL(ad5823->vdd_i2c))
             regulator_disable(ad5823->vdd_i2c);
-
         if (!IS_ERR(ad5823->vdd))
             regulator_disable(ad5823->vdd);
 
         ad5823->powered = false;
-        pr_info("Focuser powered off\n");
     }
 
     return 0;
-
-err_gpio:
-    if (gpio_is_valid(ad5823->enable_gpio))
-        gpio_set_value(ad5823->enable_gpio, 0);
-    if (!IS_ERR_OR_NULL(ad5823->vdd_i2c))
-        regulator_disable(ad5823->vdd_i2c);
-err_vdd:
-    if (!IS_ERR(ad5823->vdd))
-        regulator_disable(ad5823->vdd);
-    return ret;
 }
 
 static int ad5823_s_ctrl(struct v4l2_ctrl *ctrl)
@@ -192,19 +131,8 @@ static const struct v4l2_subdev_ops ad5823_subdev_ops = {
     .core = &ad5823_core_ops,
 };
 
-static int ad5823_parse_dt(struct ad5823 *ad5823)
+static int ad5823_parse_dt(struct device *dev, struct ad5823 *ad5823)
 {
-    struct device *dev = &ad5823->i2c_client->dev;
-    struct device_node *np = dev->of_node;
-    int ret;
-
-    ad5823->enable_gpio = of_get_named_gpio(np, "enable-gpios", 0);
-    if (gpio_is_valid(ad5823->enable_gpio)) {
-        ret = devm_gpio_request_one(dev, ad5823->enable_gpio,
-                                      GPIOF_OUT_INIT_LOW, "ad5823_enable");
-        if (ret)
-            ad5823->enable_gpio = -EINVAL;
-    }
 
     ad5823->vdd = devm_regulator_get(dev, "vdd");
     if (IS_ERR(ad5823->vdd))
@@ -229,11 +157,10 @@ static int ad5823_probe(struct i2c_client *client,
     if (!ad5823)
         return -ENOMEM;
 
-    ad5823->i2c_client = client;
     ad5823->powered = false;
     ad5823->current_focus = 0;
 
-    ret = ad5823_parse_dt(ad5823);
+    ret = ad5823_parse_dt(&client->dev, ad5823);
     if (ret) {
         dev_err(&client->dev, "Failed to parse device tree: %d\n", ret);
         return ret;
