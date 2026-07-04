@@ -184,15 +184,31 @@ static int imx179_write_reg(struct imx179 *imx179, u16 reg, u8 val)
 {
     struct i2c_client *client = imx179->client;
     u8 buf[3];
+    int ret;
+    int retries = 3;
+    int delay_us[] = {0, 1000, 5000};  /* 0, 1ms, 5ms */
 
     buf[0] = (reg >> 8) & 0xff;
     buf[1] = reg & 0xff;
     buf[2] = val;
 
-    if (i2c_master_send(client, buf, 3) != 3)
-        return -EIO;
+    /* Retry with exponential backoff on I2C failure */
+    while (retries > 0) {
+        if (delay_us[3 - retries] > 0)
+            usleep_range(delay_us[3 - retries], delay_us[3 - retries] * 2);
 
-    return 0;
+        ret = i2c_master_send(client, buf, 3);
+        if (ret == 3)
+            return 0;
+
+        dev_warn(&client->dev, "i2c_write reg(0x%04x)=0x%02x failed (ret=%d), retrying...\n",
+                 reg, val, ret);
+        retries--;
+    }
+
+    dev_err(&client->dev, "i2c_write reg(0x%04x)=0x%02x failed after retries (ret=%d)\n",
+            reg, val, ret);
+    return -EIO;
 }
 
 static int imx179_read_reg(struct imx179 *imx179, u16 reg, u8 *val)
@@ -225,6 +241,38 @@ static int imx179_read_reg(struct imx179 *imx179, u16 reg, u8 *val)
         return ret < 0 ? ret : -EIO;
     }
 
+    return 0;
+}
+
+/* Forward declaration */
+static int imx179_write_init_regs(struct imx179 *imx179);
+
+/* Soft reset: put sensor in standby, wait, then resume */
+static int imx179_soft_reset(struct imx179 *imx179)
+{
+    struct i2c_client *client = imx179->client;
+    int ret;
+
+    dev_warn(&client->dev, "Performing soft reset of IMX179\n");
+
+    /* Put sensor in standby */
+    ret = imx179_write_reg(imx179, IMX179_REG_MODE_SELECT, IMX179_MODE_STANDBY);
+    if (ret) {
+        dev_err(&client->dev, "Soft reset: standby write failed\n");
+        return ret;
+    }
+
+    /* Wait for standby to take effect */
+    msleep(10);
+
+    /* Re-apply init registers to restore sensor to known state */
+    ret = imx179_write_init_regs(imx179);
+    if (ret) {
+        dev_err(&client->dev, "Soft reset: init regs failed\n");
+        return ret;
+    }
+
+    dev_info(&client->dev, "Soft reset complete\n");
     return 0;
 }
 
@@ -512,94 +560,134 @@ static int imx179_set_fmt(struct v4l2_subdev *sd,
 static int imx179_s_stream(struct v4l2_subdev *sd, int enable)
 {
     struct imx179 *imx179 = to_imx179(sd);
+    struct i2c_client *client = imx179->client;
     int ret;
+    int attempt;
+    u8 chip_id_hi, chip_id_lo;
 
     if (enable == imx179->streaming)
         return 0;
 
     if (enable) {
-        ret = imx179_write_init_regs(imx179);
-        if (ret)
-            return ret;
-
-        /* Program output window and binning based on resolution */
-        {
-            u16 out_width = imx179->format.width;
-            u16 out_height = imx179->format.height;
-            u16 sensor_w = 3264, sensor_h = 2448;
-            u16 start_x, start_y, end_x, end_y;
-            u16 binned_w, binned_h;
-            bool use_binning;
-
-            /* Use 2x binning only when the 2x window fits in the sensor */
-            use_binning = (out_width * 2 <= sensor_w && out_height * 2 <= sensor_h);
-
-            if (use_binning) {
-                binned_w = out_width * 2;
-                binned_h = out_height * 2;
-                imx179_write_reg(imx179, 0x0301, 0x05); /* binning timing mode */
-                imx179_write_reg(imx179, 0x0383, 0x01);
-                imx179_write_reg(imx179, 0x0385, 0x01);
-                imx179_write_reg(imx179, 0x0387, 0x01);
-                imx179_write_reg(imx179, 0x0389, 0x01);
-            } else {
-                binned_w = out_width;
-                binned_h = out_height;
-                imx179_write_reg(imx179, 0x0301, 0x00); /* normal readout mode */
-                imx179_write_reg(imx179, 0x0383, 0x00);
-                imx179_write_reg(imx179, 0x0385, 0x00);
-                imx179_write_reg(imx179, 0x0387, 0x00);
-                imx179_write_reg(imx179, 0x0389, 0x00);
+        /* Retry the whole stream-on sequence up to 2 times if I2C errors occur.
+         * This handles the case where the sensor was left in a bad state by
+         * a previous HAL close/open cycle (STREAMOFF followed quickly by STREAMON).
+         */
+        for (attempt = 0; attempt < 2; attempt++) {
+            /* Verify sensor is responsive before writing registers.
+             * If not, perform soft reset to recover.
+             */
+            if (imx179_read_reg(imx179, 0x0013, &chip_id_hi) != 0 ||
+                imx179_read_reg(imx179, 0x0014, &chip_id_lo) != 0) {
+                dev_warn(&client->dev, "s_stream: chip ID read failed, attempting soft reset (attempt %d)\n", attempt);
+                if (imx179_soft_reset(imx179) != 0) {
+                    dev_err(&client->dev, "s_stream: soft reset failed\n");
+                    continue;
+                }
+                /* After soft reset, retry the chip ID read */
+                if (imx179_read_reg(imx179, 0x0013, &chip_id_hi) != 0) {
+                    dev_err(&client->dev, "s_stream: chip ID read still failing after reset\n");
+                    continue;
+                }
             }
 
-            /* Center the window */
-            start_x = (sensor_w - binned_w) / 2;
-            start_y = (sensor_h - binned_h) / 2;
-            end_x = start_x + binned_w - 1;
-            end_y = start_y + binned_h - 1;
+            ret = imx179_write_init_regs(imx179);
+            if (ret) {
+                dev_warn(&client->dev, "s_stream: init regs failed (attempt %d)\n", attempt);
+                imx179_soft_reset(imx179);
+                continue;
+            }
 
-            /* Set window start/end */
-            imx179_write_reg(imx179, 0x0344, (start_x >> 8) & 0xFF);
-            imx179_write_reg(imx179, 0x0345, start_x & 0xFF);
-            imx179_write_reg(imx179, 0x0346, (start_y >> 8) & 0xFF);
-            imx179_write_reg(imx179, 0x0347, start_y & 0xFF);
-            imx179_write_reg(imx179, 0x0348, (end_x >> 8) & 0xFF);
-            imx179_write_reg(imx179, 0x0349, end_x & 0xFF);
-            imx179_write_reg(imx179, 0x034A, (end_y >> 8) & 0xFF);
-            imx179_write_reg(imx179, 0x034B, end_y & 0xFF);
-            /* Output width/height */
-            imx179_write_reg(imx179, 0x034C, (out_width >> 8) & 0xFF);
-            imx179_write_reg(imx179, 0x034D, out_width & 0xFF);
-            imx179_write_reg(imx179, 0x034E, (out_height >> 8) & 0xFF);
-            imx179_write_reg(imx179, 0x034F, out_height & 0xFF);
-            /* Frame length lines (VTS) */
-            imx179_write_reg(imx179, 0x0340, 0x09);  /* 2510 >> 8 */
-            imx179_write_reg(imx179, 0x0341, 0xCE);  /* 2510 & 0xFF */
-            /* Line length (HTS) */
-            imx179_write_reg(imx179, 0x0342, 0x0D);  /* 3440 >> 8 */
-            imx179_write_reg(imx179, 0x0343, 0x70);  /* 3440 & 0xFF */
-            /* Set default exposure and gain */
-            imx179_write_reg(imx179, 0x0202, 0x09);  /* 2400 >> 8 */
-            imx179_write_reg(imx179, 0x0203, 0x60);  /* 2400 & 0xFF */
-            imx179_write_reg(imx179, 0x0205, 0x40);  /* gain = 64 (~2x, reduce ruido) */
-            pr_info("Output %dx%d window [%d,%d]-[%d,%d]%s\n",
-                    out_width, out_height,
-                    start_x, start_y, end_x, end_y,
-                    use_binning ? " binning=2x2" : "");
+            /* Program output window and binning based on resolution */
+            {
+                u16 out_width = imx179->format.width;
+                u16 out_height = imx179->format.height;
+                u16 sensor_w = 3264, sensor_h = 2448;
+                u16 start_x, start_y, end_x, end_y;
+                u16 binned_w, binned_h;
+                bool use_binning;
+                int reg_err = 0;
+
+                /* Use 2x binning only when the 2x window fits in the sensor */
+                use_binning = (out_width * 2 <= sensor_w && out_height * 2 <= sensor_h);
+
+                if (use_binning) {
+                    binned_w = out_width * 2;
+                    binned_h = out_height * 2;
+                    reg_err |= imx179_write_reg(imx179, 0x0301, 0x05);
+                    reg_err |= imx179_write_reg(imx179, 0x0383, 0x01);
+                    reg_err |= imx179_write_reg(imx179, 0x0385, 0x01);
+                    reg_err |= imx179_write_reg(imx179, 0x0387, 0x01);
+                    reg_err |= imx179_write_reg(imx179, 0x0389, 0x01);
+                } else {
+                    binned_w = out_width;
+                    binned_h = out_height;
+                    reg_err |= imx179_write_reg(imx179, 0x0301, 0x00);
+                    reg_err |= imx179_write_reg(imx179, 0x0383, 0x00);
+                    reg_err |= imx179_write_reg(imx179, 0x0385, 0x00);
+                    reg_err |= imx179_write_reg(imx179, 0x0387, 0x00);
+                    reg_err |= imx179_write_reg(imx179, 0x0389, 0x00);
+                }
+
+                /* Center the window */
+                start_x = (sensor_w - binned_w) / 2;
+                start_y = (sensor_h - binned_h) / 2;
+                end_x = start_x + binned_w - 1;
+                end_y = start_y + binned_h - 1;
+
+                reg_err |= imx179_write_reg(imx179, 0x0344, (start_x >> 8) & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x0345, start_x & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x0346, (start_y >> 8) & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x0347, start_y & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x0348, (end_x >> 8) & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x0349, end_x & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x034A, (end_y >> 8) & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x034B, end_y & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x034C, (out_width >> 8) & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x034D, out_width & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x034E, (out_height >> 8) & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x034F, out_height & 0xFF);
+                reg_err |= imx179_write_reg(imx179, 0x0340, 0x09);
+                reg_err |= imx179_write_reg(imx179, 0x0341, 0xCE);
+                reg_err |= imx179_write_reg(imx179, 0x0342, 0x0D);
+                reg_err |= imx179_write_reg(imx179, 0x0343, 0x70);
+                reg_err |= imx179_write_reg(imx179, 0x0202, 0x09);
+                reg_err |= imx179_write_reg(imx179, 0x0203, 0x60);
+                reg_err |= imx179_write_reg(imx179, 0x0205, 0x40);
+
+                if (reg_err) {
+                    dev_warn(&client->dev, "s_stream: register write failed, attempting soft reset (attempt %d)\n", attempt);
+                    imx179_soft_reset(imx179);
+                    continue;
+                }
+
+                pr_info("Output %dx%d window [%d,%d]-[%d,%d]%s\n",
+                        out_width, out_height,
+                        start_x, start_y, end_x, end_y,
+                        use_binning ? " binning=2x2" : "");
+            }
+
+            ret = imx179_write_reg(imx179, IMX179_REG_MODE_SELECT,
+                                    IMX179_MODE_STREAMING);
+            if (ret) {
+                dev_warn(&client->dev, "s_stream: mode select write failed (attempt %d)\n", attempt);
+                imx179_soft_reset(imx179);
+                continue;
+            }
+
+            /* Success! */
+            imx179->streaming = true;
+            pr_info("Streaming started\n");
+            return 0;
         }
 
-        ret = imx179_write_reg(imx179, IMX179_REG_MODE_SELECT,
-                                IMX179_MODE_STREAMING);
-        if (ret)
-            return ret;
-
-        imx179->streaming = true;
-        pr_info("Streaming started\n");
+        dev_err(&client->dev, "s_stream: all attempts failed, sensor may be in bad state\n");
+        return -EIO;
     } else {
         ret = imx179_write_reg(imx179, IMX179_REG_MODE_SELECT,
                                 IMX179_MODE_STANDBY);
         if (ret)
-            return ret;
+            dev_warn(&client->dev, "s_stream: standby write failed, continuing anyway\n");
 
         imx179->streaming = false;
         pr_info("Streaming stopped\n");
